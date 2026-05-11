@@ -289,16 +289,17 @@ class MainWindow(QMainWindow):
     def _toggle_mode(self):
         config = self._data.load_config()
         if self._exam.mode == ExamMode.XINGCE:
-            duration = config.get("shenlun_duration", 150)
-            modules = [
-                {"name": "小题作答", "duration_min": duration - 60},
+            modules = config.get("shenlun_modules") or [
+                {"name": "小题作答", "duration_min": 90},
                 {"name": "大作文", "duration_min": 60},
             ]
+            duration = sum(m["duration_min"] for m in modules)
             self._exam.set_mode(ExamMode.SHENLUN, modules, duration)
             self._mode_label.setText("申论")
         else:
             modules = config.get("xingce_modules", [])
-            self._exam.set_mode(ExamMode.XINGCE, modules, 120)
+            duration = sum(m["duration_min"] for m in modules)
+            self._exam.set_mode(ExamMode.XINGCE, modules, duration)
             self._mode_label.setText("行测")
         self._module_label.setText(self._exam.current_module_name)
         self.reset()

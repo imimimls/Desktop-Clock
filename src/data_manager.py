@@ -21,6 +21,10 @@ DEFAULT_CONFIG = {
         {"name": "判断推理", "duration_min": 35},
         {"name": "资料分析", "duration_min": 25},
     ],
+    "shenlun_modules": [
+        {"name": "小题作答", "duration_min": 90},
+        {"name": "大作文", "duration_min": 60},
+    ],
     "shenlun_duration": 150,
 }
 

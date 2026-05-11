@@ -69,50 +69,67 @@ class SettingsDialog(QDialog):
             editor.setText(dlg.hotkey_string)
 
     def _create_module_tab(self):
+        # 向后兼容：旧配置没有 shenlun_modules 时自动迁移
+        if "shenlun_modules" not in self._config:
+            duration = self._config.get("shenlun_duration", 150)
+            self._config["shenlun_modules"] = [
+                {"name": "小题作答", "duration_min": duration - 60},
+                {"name": "大作文", "duration_min": 60},
+            ]
+
         w = QWidget()
         layout = QVBoxLayout(w)
 
-        shenlun_layout = QHBoxLayout()
-        shenlun_layout.addWidget(QLabel("申论整卷时长（分钟）："))
-        self._shenlun_spin = QSpinBox()
-        self._shenlun_spin.setRange(60, 300)
-        self._shenlun_spin.setValue(self._config.get("shenlun_duration", 150))
-        shenlun_layout.addWidget(self._shenlun_spin)
-        shenlun_layout.addStretch()
-        layout.addLayout(shenlun_layout)
+        layout.addWidget(QLabel("行测模块配置（双击编辑，拖拽排序）："))
+        self._xingce_list = self._create_module_list_widget("xingce_modules")
+        layout.addWidget(self._xingce_list)
+        layout.addLayout(self._create_module_buttons(self._xingce_list))
 
-        layout.addWidget(QLabel("行测模块配置（双击编辑）："))
-        self._module_list = QListWidget()
-        modules = self._config.get("xingce_modules", [])
+        layout.addWidget(QLabel("申论模块配置（双击编辑，拖拽排序）："))
+        self._shenlun_list = self._create_module_list_widget("shenlun_modules")
+        layout.addWidget(self._shenlun_list)
+        layout.addLayout(self._create_module_buttons(self._shenlun_list))
+        return w
+
+    def _create_module_list_widget(self, config_key: str):
+        """创建支持拖拽排序的模块列表"""
+        lst = QListWidget()
+        lst.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        lst.setDefaultDropAction(Qt.DropAction.MoveAction)
+        modules = self._config.get(config_key, [])
         for mod in modules:
             item = QListWidgetItem(f"{mod['name']}  —  {mod['duration_min']} 分钟")
             item.setData(Qt.ItemDataRole.UserRole, mod)
-            self._module_list.addItem(item)
-        self._module_list.itemDoubleClicked.connect(self._edit_module)
-        layout.addWidget(self._module_list)
+            lst.addItem(item)
+        lst.itemDoubleClicked.connect(lambda item: self._edit_module_item(lst, item))
+        # 拖拽排序后实时保存
+        lst.model().rowsMoved.connect(lambda *args: self._save_modules_config())
+        return lst
 
+    def _create_module_buttons(self, lst: QListWidget):
+        """创建模块列表的添加/编辑/删除按钮行"""
         btn_layout = QHBoxLayout()
         add_btn = QPushButton("添加模块")
-        add_btn.clicked.connect(self._add_module)
+        add_btn.clicked.connect(lambda: self._add_module_item(lst))
         btn_layout.addWidget(add_btn)
         edit_btn = QPushButton("编辑选中")
-        edit_btn.clicked.connect(lambda: self._edit_module(self._module_list.currentItem()))
+        edit_btn.clicked.connect(lambda: self._edit_module_item(lst, lst.currentItem()))
         btn_layout.addWidget(edit_btn)
         del_btn = QPushButton("删除选中")
-        del_btn.clicked.connect(self._delete_module)
+        del_btn.clicked.connect(lambda: self._delete_module_item(lst))
         btn_layout.addWidget(del_btn)
         btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-        return w
+        return btn_layout
 
-    def _add_module(self):
+    def _add_module_item(self, lst: QListWidget):
         dlg = ModuleEditDialog("新模块", 10, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             item = QListWidgetItem(f"{dlg.name}  —  {dlg.duration} 分钟")
             item.setData(Qt.ItemDataRole.UserRole, {"name": dlg.name, "duration_min": dlg.duration})
-            self._module_list.addItem(item)
+            lst.addItem(item)
+            self._save_modules_config()
 
-    def _edit_module(self, item):
+    def _edit_module_item(self, lst: QListWidget, item):
         if not item:
             return
         mod = item.data(Qt.ItemDataRole.UserRole)
@@ -120,11 +137,26 @@ class SettingsDialog(QDialog):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             item.setText(f"{dlg.name}  —  {dlg.duration} 分钟")
             item.setData(Qt.ItemDataRole.UserRole, {"name": dlg.name, "duration_min": dlg.duration})
+            self._save_modules_config()
 
-    def _delete_module(self):
-        row = self._module_list.currentRow()
+    def _delete_module_item(self, lst: QListWidget):
+        row = lst.currentRow()
         if row >= 0:
-            self._module_list.takeItem(row)
+            lst.takeItem(row)
+            self._save_modules_config()
+
+    def _save_modules_config(self):
+        """实时保存两个模块列表到配置文件"""
+        config = self._data.load_config()
+        config["xingce_modules"] = [
+            self._xingce_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._xingce_list.count())
+        ]
+        config["shenlun_modules"] = [
+            self._shenlun_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._shenlun_list.count())
+        ]
+        self._data.save_config(config)
 
     def _create_appearance_tab(self):
         w = QWidget()
@@ -168,11 +200,14 @@ class SettingsDialog(QDialog):
         config = self._data.load_config()
         for key, editor in self._hk_editors.items():
             config["hotkeys"][key] = editor.text()
-        modules = []
-        for i in range(self._module_list.count()):
-            modules.append(self._module_list.item(i).data(Qt.ItemDataRole.UserRole))
-        config["xingce_modules"] = modules
-        config["shenlun_duration"] = self._shenlun_spin.value()
+        config["xingce_modules"] = [
+            self._xingce_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._xingce_list.count())
+        ]
+        config["shenlun_modules"] = [
+            self._shenlun_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._shenlun_list.count())
+        ]
         config["appearance"]["theme"] = "dark" if self._theme_combo.currentText() == "深色" else "light"
         config["appearance"]["opacity"] = self._opacity_spin.value()
         config["reminder"]["enabled"] = self._reminder_cb.isChecked()
