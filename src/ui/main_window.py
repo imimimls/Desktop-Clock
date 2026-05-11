@@ -5,7 +5,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QPushButton, QMenu, QApplication, QSizePolicy
+    QLabel, QPushButton, QMenu, QApplication, QSizePolicy, QSlider
 )
 
 from ..timer_engine import TimerEngine, TimerState, TimerMode
@@ -54,13 +54,14 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self._connect_signals()
         self._setup_context_menu()
+        self._sync_initial_state()
 
     # ============ 窗口设置 ============
 
     def _setup_window(self):
         self.setWindowTitle("公考计时器")
-        self.setMinimumSize(280, 60)
-        self.resize(420, 80)
+        self.setMinimumSize(360, 100)
+        self.resize(500, 130)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.Tool |
@@ -116,6 +117,33 @@ class MainWindow(QMainWindow):
         self._progress_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._root_layout.addWidget(self._progress_label)
 
+        # ============================================================
+        # DEBUG: 可拖动滑块，手动控制剩余秒数，用于快速测试超时效果
+        # 测试完成后注释掉此行到 _on_debug_slider 方法即可隐藏
+        # ============================================================
+        self._debug_slider = QSlider(Qt.Orientation.Horizontal)
+        self._debug_slider.setFixedHeight(12)
+        self._debug_slider.setVisible(False)  # 改为 True 即可恢复
+        self._debug_slider.valueChanged.connect(self._on_debug_slider)
+        self._root_layout.addWidget(self._debug_slider)
+        # ============================================================
+
+        # 底部按钮行
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        self._start_btn = QPushButton("开始")
+        self._start_btn.setMinimumHeight(28)
+        self._start_btn.clicked.connect(self.start_pause)
+        btn_row.addWidget(self._start_btn)
+
+        self._reset_btn = QPushButton("重置")
+        self._reset_btn.setMinimumHeight(28)
+        self._reset_btn.clicked.connect(self.reset)
+        btn_row.addWidget(self._reset_btn)
+
+        self._root_layout.addLayout(btn_row)
+
     # ============ 主题 ============
 
     def _apply_theme(self):
@@ -134,6 +162,16 @@ class MainWindow(QMainWindow):
             QPushButton {{ color: {text}; background: transparent; border: none; border-radius: 4px; }}
             QPushButton:hover {{ background: {progress_bg}; }}
         """)
+        # 底部按钮使用填充样式
+        btn_style = f"""
+            QPushButton {{
+                color: {text}; background: {surface}; border: 1px solid {progress_bg};
+                border-radius: 4px; padding: 2px 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {accent}; color: {bg}; }}
+        """
+        self._start_btn.setStyleSheet(btn_style)
+        self._reset_btn.setStyleSheet(btn_style)
         self._update_fonts()
         self._update_progress()
 
@@ -152,6 +190,22 @@ class MainWindow(QMainWindow):
         self._update_progress()
 
     # ============ 进度条 ============
+
+    # ============================================================
+    # DEBUG: 滑块拖动 → 手动设置剩余秒数，拖到 0 触发超时弹窗
+    # ============================================================
+    def _on_debug_slider(self, value: int):
+        if not hasattr(self, '_debug_slider'):
+            return
+        # 更新计时器剩余秒数
+        self._timer.set_remaining(value)
+        # 手动刷新 UI 时间和进度条
+        self._on_tick(value, self._timer.elapsed_sec)
+        # 拖到 0 秒 → 触发完整超时收尾逻辑
+        if value == 0:
+            self._timer.pause()
+            self._reminder.show_timeout_dialog(self)
+    # ============================================================
 
     def _update_progress(self):
         total = self._exam.total_duration_sec
@@ -180,6 +234,31 @@ class MainWindow(QMainWindow):
         self._exam.module_changed.connect(self._on_module_changed)
         self._exam.all_modules_done.connect(self._on_all_modules_done)
 
+    def _sync_initial_state(self):
+        """从 exam_manager 同步初始显示状态，避免硬编码默认值"""
+        self._mode_label.setText("行测" if self._exam.mode == ExamMode.XINGCE else "申论")
+        self._module_label.setText(self._exam.current_module_name)
+        total = self._exam.total_duration_sec
+        m = total // 60
+        self._time_label.setText(f"{m:02d}:00")
+        self._update_debug_slider_range()
+
+    # ============================================================
+    # DEBUG: 根据当前计时模式更新滑块范围
+    # ============================================================
+    def _update_debug_slider_range(self):
+        if not hasattr(self, '_debug_slider'):
+            return
+        total = self._exam.total_duration_sec
+        self._debug_slider.blockSignals(True)
+        self._debug_slider.setRange(0, total)
+        if self._timer.state == TimerState.IDLE:
+            self._debug_slider.setValue(total)
+        else:
+            self._debug_slider.setValue(self._timer.remaining_sec)
+        self._debug_slider.blockSignals(False)
+    # ============================================================
+
     def _on_tick(self, remaining_sec, elapsed_sec):
         if self._timer.mode == TimerMode.COUNTDOWN:
             m, s = divmod(remaining_sec, 60)
@@ -188,6 +267,11 @@ class MainWindow(QMainWindow):
         self._time_label.setText(f"{m:02d}:{s:02d}")
         self._reminder.check(remaining_sec, elapsed_sec)
         self._update_progress()
+        # DEBUG: 同步滑块位置（无信号避免循环）
+        if hasattr(self, '_debug_slider') and self._debug_slider.isVisible():
+            self._debug_slider.blockSignals(True)
+            self._debug_slider.setValue(remaining_sec)
+            self._debug_slider.blockSignals(False)
         # 剩余不足5分钟变色
         if self._theme == "dark":
             danger = DARK_DANGER
@@ -206,8 +290,13 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, state):
         if state == TimerState.RUNNING:
             self._anti_ss.enable()
+            self._start_btn.setText("暂停")
+        elif state == TimerState.PAUSED:
+            self._anti_ss.disable()
+            self._start_btn.setText("继续")
         else:
             self._anti_ss.disable()
+            self._start_btn.setText("开始")
 
     def _on_timeout(self):
         self._reminder.show_timeout_dialog(self)
@@ -258,6 +347,7 @@ class MainWindow(QMainWindow):
         self._update_progress()
         text_color = DARK_TEXT if self._theme == "dark" else LIGHT_TEXT
         self._time_label.setStyleSheet(f"color: {text_color}; background: transparent;")
+        self._update_debug_slider_range()
 
     def switch_next_module(self):
         """空格键触发：结束当前模块 + 下一模块"""
@@ -340,6 +430,8 @@ class MainWindow(QMainWindow):
         self._module_label.setVisible(visible)
         self._settings_btn.setVisible(visible)
         self._progress_label.setVisible(visible)
+        self._start_btn.setVisible(visible)
+        self._reset_btn.setVisible(visible)
 
     # ============ UI 弹窗 ============
 

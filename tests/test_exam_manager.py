@@ -22,7 +22,7 @@ def test_switch_next_module():
     mgr.set_mode(ExamMode.XINGCE, modules)
     mgr.start_module(0)
     result = mgr.switch_next_module(320)
-    assert result["prev_module"] == "A"
+    assert result["name"] == "A"
     assert result["actual_sec"] == 320
     assert result["overtime"] == True
     assert mgr.current_module_name == "B"
@@ -33,7 +33,7 @@ def test_switch_last_module_finishes():
     mgr = ExamManager()
     mgr.set_mode(ExamMode.XINGCE, modules)
     result = mgr.switch_next_module()
-    assert result["prev_module"] == "Only"
+    assert result["name"] == "Only"
     assert mgr.is_all_modules_done
 
 

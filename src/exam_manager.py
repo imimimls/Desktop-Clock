@@ -76,7 +76,7 @@ class ExamManager(QObject):
         planned_sec = self.current_module_duration_sec
         actual_sec = current_elapsed_sec - self._module_start_elapsed
         record = {
-            "prev_module": prev_name,
+            "name": prev_name,
             "planned_min": planned_sec // 60,
             "actual_sec": actual_sec,
             "overtime": actual_sec > planned_sec if planned_sec > 0 else False,
