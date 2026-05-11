@@ -5,7 +5,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QPushButton, QMenu, QApplication, QSizePolicy, QSlider
+    QLabel, QPushButton, QMenu, QApplication, QSizePolicy, QSlider, QFrame
 )
 
 from ..timer_engine import TimerEngine, TimerState, TimerMode
@@ -45,6 +45,12 @@ class MainWindow(QMainWindow):
         self._clickthrough = False
         self._mini_timer = None
         self._drag_pos = None
+
+        # 模块切换对比面板
+        self._comparison_panel = None
+        self._panel_rows = None
+        self._panel_visible = False
+        self._base_height = None
 
         # 计时引擎
         self._timer = TimerEngine(self)
@@ -144,6 +150,46 @@ class MainWindow(QMainWindow):
 
         self._root_layout.addLayout(btn_row)
 
+        self._create_comparison_panel()
+
+    def _create_comparison_panel(self):
+        """模块切换时展开的用时对比面板，初始隐藏"""
+        panel = QWidget()
+        panel.setVisible(False)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 4, 0, 0)
+        panel_layout.setSpacing(2)
+
+        # 表头行
+        header = QWidget()
+        header_row = QHBoxLayout(header)
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(4)
+        self._panel_header_labels = []
+        for text, stretch in [("模块", 3), ("预设", 2), ("实际", 2), ("差值", 2)]:
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header_row.addWidget(lbl, stretch)
+            self._panel_header_labels.append(lbl)
+        panel_layout.addWidget(header)
+
+        # 分隔线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        self._panel_sep = sep
+        panel_layout.addWidget(sep)
+
+        # 数据行容器
+        self._panel_rows = QVBoxLayout()
+        self._panel_rows.setSpacing(1)
+        panel_layout.addLayout(self._panel_rows)
+
+        panel_layout.addStretch()
+
+        self._comparison_panel = panel
+        self._root_layout.addWidget(panel)
+
     # ============ 主题 ============
 
     def _apply_theme(self):
@@ -172,17 +218,35 @@ class MainWindow(QMainWindow):
         """
         self._start_btn.setStyleSheet(btn_style)
         self._reset_btn.setStyleSheet(btn_style)
+        # 对比面板样式
+        sep_color = progress_bg
+        self._panel_sep.setStyleSheet(f"background: {sep_color}; border: none;")
+        header_style = f"color: {text}; background: transparent; font-weight: bold;"
+        for lbl in self._panel_header_labels:
+            lbl.setStyleSheet(header_style)
         self._update_fonts()
         self._update_progress()
 
     def _update_fonts(self):
-        h = self.height()
+        # 以面板出现前的基准高度计算字体，避免 Qt 布局延迟导致跳变
+        h = self._base_height if self._base_height is not None else self.height()
         time_font_size = max(18, int(h * 0.45))
         label_font_size = max(10, int(h * 0.15))
         self._time_label.setFont(QFont("Consolas", time_font_size, QFont.Weight.Bold))
         body_font = QFont("Microsoft YaHei", label_font_size)
         self._mode_label.setFont(body_font)
         self._module_label.setFont(body_font)
+        # 面板字体（略小于正文）
+        panel_font_size = max(9, int(h * 0.12))
+        panel_font = QFont("Microsoft YaHei", panel_font_size)
+        for lbl in self._panel_header_labels:
+            lbl.setFont(panel_font)
+        # 更新已有数据行字体
+        for i in range(self._panel_rows.count()):
+            item = self._panel_rows.itemAt(i)
+            if item and item.widget():
+                for child in item.widget().findChildren(QLabel):
+                    child.setFont(panel_font)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -233,6 +297,7 @@ class MainWindow(QMainWindow):
         self._reminder.reminder_triggered.connect(self._on_reminder)
         self._exam.module_changed.connect(self._on_module_changed)
         self._exam.all_modules_done.connect(self._on_all_modules_done)
+        self._exam.module_switched.connect(self._on_module_switched)
 
     def _sync_initial_state(self):
         """从 exam_manager 同步初始显示状态，避免硬编码默认值"""
@@ -300,6 +365,17 @@ class MainWindow(QMainWindow):
 
     def _on_timeout(self):
         self._reminder.show_timeout_dialog(self)
+        # 弹窗关闭后自动推进到下一模块或重置
+        self._exam.switch_next_module(self._timer.elapsed_sec)
+        if self._exam.is_all_modules_done:
+            self._save_record()
+            self.reset()
+        else:
+            duration = self._exam.current_module_duration_sec
+            self._timer.set_countdown(duration)
+            self._timer.start()
+            self._exam.start_module(0)
+            self._module_label.setText(self._exam.current_module_name)
 
     def _on_reminder(self, remaining_sec):
         if self._reminder.flash_enabled:
@@ -308,10 +384,107 @@ class MainWindow(QMainWindow):
     def _on_module_changed(self, name, duration_sec):
         self._module_label.setText(name)
 
+    def _on_module_switched(self, record):
+        """空格键切换模块时展开对比面板，显示上模块用时数据（每次替换，不累积）"""
+        # 清除旧行，始终只展示最新一条
+        while self._panel_rows.count():
+            item = self._panel_rows.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        name = record.get("name", "")
+        planned_min = record.get("planned_min", 0)
+        actual_sec = record.get("actual_sec", 0)
+
+        planned_sec = planned_min * 60
+        diff_sec = actual_sec - planned_sec
+
+        a_m, a_s = divmod(actual_sec, 60)
+        actual_str = f"{a_m}:{a_s:02d}"
+
+        if self._theme == "dark":
+            danger = DARK_DANGER
+            success = DARK_PROGRESS_FG
+            text = DARK_TEXT
+        else:
+            danger = LIGHT_DANGER
+            success = LIGHT_PROGRESS_FG
+            text = LIGHT_TEXT
+
+        if diff_sec > 0:
+            d_m, d_s = divmod(diff_sec, 60)
+            diff_str = f"+{d_m}:{d_s:02d}" if d_m > 0 else f"+{d_s}秒"
+            diff_color = danger
+        elif diff_sec < 0:
+            saved = -diff_sec
+            d_m, d_s = divmod(saved, 60)
+            diff_str = f"-{d_m}:{d_s:02d}" if d_m > 0 else f"-{d_s}秒"
+            diff_color = success
+        else:
+            diff_str = "正好"
+            diff_color = text
+
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        name_lbl = QLabel(name)
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row_layout.addWidget(name_lbl, 3)
+
+        planned_lbl = QLabel(f"{planned_min}分")
+        planned_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row_layout.addWidget(planned_lbl, 2)
+
+        actual_lbl = QLabel(actual_str)
+        actual_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row_layout.addWidget(actual_lbl, 2)
+
+        diff_lbl = QLabel(diff_str)
+        diff_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        diff_lbl.setStyleSheet(f"color: {diff_color}; background: transparent; font-weight: bold;")
+        row_layout.addWidget(diff_lbl, 2)
+
+        self._panel_rows.addWidget(row)
+        self._adjust_window_for_panel()
+        self._update_fonts()
+
+    def _adjust_window_for_panel(self):
+        """面板可见后窗口向下扩展固定高度（表头+单行≈46px）"""
+        if not self._panel_visible:
+            self._base_height = self.height()
+            self._comparison_panel.setVisible(True)
+            self._panel_visible = True
+            self.resize(self.width(), self._base_height + 48)
+            self._update_fonts()
+
+    def _clear_comparison_panel(self):
+        """清空面板数据行并隐藏"""
+        while self._panel_rows.count():
+            item = self._panel_rows.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self._comparison_panel.setVisible(False)
+        self._panel_visible = False
+        if self._base_height is not None:
+            self.resize(self.width(), self._base_height)
+            self._update_fonts()
+            self._base_height = None
+
     def _on_all_modules_done(self):
+        # 若由自然超时触发，_on_timeout 已处理弹窗和重置，此处跳过
+        if self._timer.state == TimerState.FINISHED:
+            return
         self._timer.pause()
         self._save_record()
-        QTimer.singleShot(200, lambda: self._reminder.show_timeout_dialog(self))
+        QTimer.singleShot(200, lambda: self._show_all_done_and_reset())
+
+    def _show_all_done_and_reset(self):
+        self._reminder.show_timeout_dialog(self)
+        self.reset()
 
     def _flash_window(self):
         # 简单的透明度闪烁
@@ -348,6 +521,7 @@ class MainWindow(QMainWindow):
         text_color = DARK_TEXT if self._theme == "dark" else LIGHT_TEXT
         self._time_label.setStyleSheet(f"color: {text_color}; background: transparent;")
         self._update_debug_slider_range()
+        self._clear_comparison_panel()
 
     def switch_next_module(self):
         """空格键触发：结束当前模块 + 下一模块"""
@@ -432,6 +606,15 @@ class MainWindow(QMainWindow):
         self._progress_label.setVisible(visible)
         self._start_btn.setVisible(visible)
         self._reset_btn.setVisible(visible)
+        if self._panel_visible:
+            QTimer.singleShot(0, self._recalc_panel_base)
+
+    def _recalc_panel_base(self):
+        """窗口布局变化后重算不含面板的基准高度"""
+        if not self._panel_visible:
+            return
+        self._base_height = self._comparison_panel.pos().y()
+        self._adjust_window_for_panel()
 
     # ============ UI 弹窗 ============
 
