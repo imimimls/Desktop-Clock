@@ -26,3 +26,12 @@ ExamTimer/
 # 临时文件
 *.tmp
 /tmp/
+
+# Claude Code 本地配置、规则、缓存，禁止提交
+.claude/
+ai-temp/
+*.tmp
+*.bak
+temp*
+test-*.py
+scratch*
